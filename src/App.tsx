@@ -1,60 +1,5 @@
-import React, { useState, useCallback, useRef, useEffect, Component, ErrorInfo, ReactNode } from 'react';
-
-// Error Boundary Component
-interface ErrorBoundaryProps {
-  children: ReactNode;
-}
-
-interface ErrorBoundaryState {
-  hasError: boolean;
-  error: Error | null;
-}
-
-class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  constructor(props: ErrorBoundaryProps) {
-    super(props);
-    this.state = { hasError: false, error: null };
-  }
-
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { hasError: true, error };
-  }
-
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error("Uncaught error:", error, errorInfo);
-  }
-
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
-          <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center border border-red-100">
-            <div className="bg-red-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-              <X className="w-8 h-8 text-red-500" />
-            </div>
-            <h2 className="text-2xl font-bold text-gray-900 mb-2">Ups! Terjadi kesalahan</h2>
-            <p className="text-gray-600 mb-6">
-              Aplikasi mengalami masalah saat memuat. Silakan muat ulang halaman.
-            </p>
-            <button
-              onClick={() => window.location.reload()}
-              className="w-full bg-[#E5322E] text-white py-3 rounded-xl font-bold hover:bg-[#C42B27] transition-colors"
-            >
-              Muat Ulang Halaman
-            </button>
-            {process.env.NODE_ENV === 'development' && (
-              <pre className="mt-4 p-4 bg-gray-100 rounded text-left text-xs overflow-auto max-h-40">
-                {this.state.error?.toString()}
-              </pre>
-            )}
-          </div>
-        </div>
-      );
-    }
-
-    return this.props.children;
-  }
-}
+import * as React from 'react';
+import { useState, useCallback, useRef, useEffect, ErrorInfo, ReactNode } from 'react';
 import { 
   Merge, 
   Scissors, 
@@ -83,15 +28,70 @@ import { saveAs } from 'file-saver';
 import { jsPDF } from 'jspdf';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-import { Tool, ToolId, PDFFile } from './types';
-import { TOOLS } from './constants';
-
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Set worker path for pdfjs-dist
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+
+// Error Boundary Component
+interface ErrorBoundaryProps {
+  children: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    (this as any).state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("Uncaught error:", error, errorInfo);
+  }
+
+  render() {
+    if ((this as any).state.hasError) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+          <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center border border-red-100">
+            <div className="bg-red-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+              <X className="w-8 h-8 text-red-500" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">Ups! Terjadi kesalahan</h2>
+            <p className="text-gray-600 mb-6">
+              Aplikasi mengalami masalah saat memuat. Silakan muat ulang halaman.
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              className="w-full bg-[#E5322E] text-white py-3 rounded-xl font-bold hover:bg-[#C42B27] transition-colors"
+            >
+              Muat Ulang Halaman
+            </button>
+            {process.env.NODE_ENV === 'development' && (
+              <pre className="mt-4 p-4 bg-gray-100 rounded text-left text-xs overflow-auto max-h-40">
+                {(this as any).state.error?.toString()}
+              </pre>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    return (this as any).props.children;
+  }
+}
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+import { Tool, ToolId, PDFFile } from './types';
+import { TOOLS } from './constants';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -143,10 +143,19 @@ export default function App() {
           for (let i = 1; i <= pdf.numPages; i++) {
             const page = await pdf.getPage(i);
             const textContent = await page.getTextContent();
-            const pageText = textContent.items.map((item: any) => item.str).join(' ');
-            fullText += `<p>${pageText}</p>`;
+            let lastY: number | null = null;
+            let pageHtml = '';
+            
+            for (const item of textContent.items as any[]) {
+              if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
+                pageHtml += '<br/>';
+              }
+              pageHtml += item.str;
+              lastY = item.transform[5];
+            }
+            fullText += `<div style="margin-bottom: 20px;">${pageHtml}</div>`;
           }
-          setEditorContent(fullText || '<p>Start typing here...</p>');
+          setEditorContent(fullText || '<p>Mulai mengetik di sini...</p>');
         } catch (error) {
           console.error('Error extracting text:', error);
           setEditorContent('<p>Failed to extract text. You can still start typing here...</p>');
@@ -176,37 +185,41 @@ export default function App() {
 
     try {
       if (activeTool.id === 'edit') {
-        const doc = new jsPDF();
-        
-        // Simple HTML to PDF conversion using jsPDF's html method
-        // We need a temporary element to render the content
+        const doc = new jsPDF('p', 'mm', 'a4');
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = editorContent;
-        tempDiv.style.width = '180mm'; // Standard A4 width minus margins
+        tempDiv.style.width = '190mm';
         tempDiv.style.padding = '10mm';
         tempDiv.style.fontSize = '12pt';
         tempDiv.style.lineHeight = '1.5';
         tempDiv.style.fontFamily = 'Arial, sans-serif';
-        tempDiv.className = 'ql-editor'; // Apply Quill styles if needed
+        tempDiv.style.color = '#000000';
+        tempDiv.style.backgroundColor = '#ffffff';
+        tempDiv.className = 'ql-editor'; 
+        tempDiv.style.position = 'absolute';
+        tempDiv.style.left = '-9999px';
+        tempDiv.style.top = '0';
         document.body.appendChild(tempDiv);
 
         try {
           await doc.html(tempDiv, {
+            x: 0,
+            y: 0,
+            width: 210,
+            windowWidth: 800,
+            autoPaging: 'text',
+            margin: [10, 10, 10, 10],
             callback: function (doc) {
               const pdfBlob = doc.output('blob');
               setProcessedSize(pdfBlob.size);
               setResultUrl(URL.createObjectURL(pdfBlob));
               setIsProcessing(false);
               document.body.removeChild(tempDiv);
-            },
-            x: 10,
-            y: 10,
-            width: 190,
-            windowWidth: 800
+            }
           });
-          return; // The callback handles the rest
+          return; 
         } catch (err) {
-          document.body.removeChild(tempDiv);
+          if (document.body.contains(tempDiv)) document.body.removeChild(tempDiv);
           throw err;
         }
       } else if (activeTool.id === 'merge') {
@@ -226,8 +239,15 @@ export default function App() {
         const pdfBytes = await files[0].file.arrayBuffer();
         const pdf = await PDFDocument.load(pdfBytes);
         
-        const compressedPdfBytes = await pdf.save({ 
+        // Create a new document and copy pages to strip redundant data
+        const compressedPdf = await PDFDocument.create();
+        const copiedPages = await compressedPdf.copyPages(pdf, pdf.getPageIndices());
+        copiedPages.forEach((page) => compressedPdf.addPage(page));
+        
+        // Save with maximum compression options available in pdf-lib
+        const compressedPdfBytes = await compressedPdf.save({ 
           useObjectStreams: true,
+          addDefaultPage: false,
           updateFieldAppearances: false
         });
         
@@ -334,7 +354,10 @@ export default function App() {
             rotate: { angle: 45, type: 'degrees' as any }
           });
         });
-        const watermarkedPdfBytes = await pdf.save();
+        const watermarkedPdfBytes = await pdf.save({ 
+          useObjectStreams: true,
+          updateFieldAppearances: false
+        });
         const blob = new Blob([watermarkedPdfBytes], { type: 'application/pdf' });
         setProcessedSize(blob.size);
         const url = URL.createObjectURL(blob);
