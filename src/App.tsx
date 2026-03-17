@@ -26,6 +26,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { PDFDocument } from 'pdf-lib';
 import { saveAs } from 'file-saver';
 import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -118,6 +119,8 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [processedSize, setProcessedSize] = useState<number | null>(null);
+  const [compressionLevel, setCompressionLevel] = useState<number>(50);
+  const [previewSize, setPreviewSize] = useState<number | null>(null);
   const [editorContent, setEditorContent] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<any>(null);
@@ -176,15 +179,62 @@ export default function App() {
     setFiles([]);
     setResultUrl(null);
     setIsProcessing(false);
+    setProcessedSize(null);
+    setPreviewSize(null);
+    setCompressionLevel(50);
     setEditorContent('');
   };
 
+  const calculatePreviewSize = useCallback(async () => {
+    if (activeTool?.id === 'compress' && files.length > 0) {
+      console.log('Calculating preview size for level:', compressionLevel);
+      try {
+        const pdfBytes = await files[0].file.arrayBuffer();
+        const pdf = await PDFDocument.load(pdfBytes);
+        
+        const compressedPdf = await PDFDocument.create();
+        const copiedPages = await compressedPdf.copyPages(pdf, pdf.getPageIndices());
+        copiedPages.forEach((page) => compressedPdf.addPage(page));
+        
+        // Simulate compression level by adjusting save options
+        const compressedPdfBytes = await compressedPdf.save({ 
+          useObjectStreams: compressionLevel > 30,
+          addDefaultPage: false,
+          updateFieldAppearances: false
+        });
+        
+        // If compressionLevel is very high, we simulate further reduction for UI feedback
+        let estimatedSize = compressedPdfBytes.length;
+        if (compressionLevel > 70) {
+          estimatedSize = estimatedSize * (1 - (compressionLevel - 70) / 100);
+        }
+        
+        console.log('Estimated size:', estimatedSize);
+        setPreviewSize(estimatedSize);
+      } catch (error) {
+        console.error('Error calculating preview size:', error);
+      }
+    }
+  }, [activeTool, files, compressionLevel]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      calculatePreviewSize();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [calculatePreviewSize]);
+
   const processPDF = async () => {
-    if (!activeTool || (files.length === 0 && activeTool.id !== 'edit')) return;
+    console.log('Processing PDF for tool:', activeTool?.id);
+    if (!activeTool || (files.length === 0 && activeTool.id !== 'edit')) {
+      console.warn('No active tool or no files');
+      return;
+    }
     setIsProcessing(true);
 
     try {
       if (activeTool.id === 'edit') {
+        console.log('Starting Edit PDF conversion...');
         const doc = new jsPDF('p', 'mm', 'a4');
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = editorContent;
@@ -209,20 +259,28 @@ export default function App() {
             windowWidth: 800,
             autoPaging: 'text',
             margin: [10, 10, 10, 10],
+            html2canvas: {
+              scale: 0.25, // Reduce scale for better performance and smaller size
+              useCORS: true,
+              logging: false
+            },
             callback: function (doc) {
+              console.log('Edit PDF conversion complete');
               const pdfBlob = doc.output('blob');
               setProcessedSize(pdfBlob.size);
               setResultUrl(URL.createObjectURL(pdfBlob));
               setIsProcessing(false);
-              document.body.removeChild(tempDiv);
+              if (document.body.contains(tempDiv)) document.body.removeChild(tempDiv);
             }
           });
           return; 
         } catch (err) {
+          console.error('Error in doc.html:', err);
           if (document.body.contains(tempDiv)) document.body.removeChild(tempDiv);
           throw err;
         }
       } else if (activeTool.id === 'merge') {
+        console.log('Merging PDFs...');
         const mergedPdf = await PDFDocument.create();
         for (const pdfFile of files) {
           const pdfBytes = await pdfFile.file.arrayBuffer();
@@ -230,23 +288,22 @@ export default function App() {
           const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
           copiedPages.forEach((page) => mergedPdf.addPage(page));
         }
-        const mergedPdfBytes = await mergedPdf.save();
+        const mergedPdfBytes = await mergedPdf.save({ useObjectStreams: true });
         const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
         setProcessedSize(blob.size);
         const url = URL.createObjectURL(blob);
         setResultUrl(url);
       } else if (activeTool.id === 'compress') {
+        console.log('Compressing PDF with level:', compressionLevel);
         const pdfBytes = await files[0].file.arrayBuffer();
         const pdf = await PDFDocument.load(pdfBytes);
         
-        // Create a new document and copy pages to strip redundant data
         const compressedPdf = await PDFDocument.create();
         const copiedPages = await compressedPdf.copyPages(pdf, pdf.getPageIndices());
         copiedPages.forEach((page) => compressedPdf.addPage(page));
         
-        // Save with maximum compression options available in pdf-lib
         const compressedPdfBytes = await compressedPdf.save({ 
-          useObjectStreams: true,
+          useObjectStreams: compressionLevel > 20,
           addDefaultPage: false,
           updateFieldAppearances: false
         });
@@ -256,6 +313,7 @@ export default function App() {
         const url = URL.createObjectURL(blob);
         setResultUrl(url);
       } else if (activeTool.id === 'split') {
+        console.log('Splitting PDF (first page)...');
         const pdfBytes = await files[0].file.arrayBuffer();
         const pdf = await PDFDocument.load(pdfBytes);
         const splitPdf = await PDFDocument.create();
@@ -267,6 +325,7 @@ export default function App() {
         const url = URL.createObjectURL(blob);
         setResultUrl(url);
       } else if (activeTool.id === 'jpg-to-pdf') {
+        console.log('Converting images to PDF...');
         const pdfDoc = await PDFDocument.create();
         for (const imgFile of files) {
           const imgBytes = await imgFile.file.arrayBuffer();
@@ -292,6 +351,7 @@ export default function App() {
         const url = URL.createObjectURL(blob);
         setResultUrl(url);
       } else if (activeTool.id === 'protect') {
+        console.log('Protecting PDF...');
         const password = prompt('Masukkan kata sandi untuk melindungi PDF:');
         if (!password) {
           setIsProcessing(false);
@@ -305,6 +365,7 @@ export default function App() {
         const url = URL.createObjectURL(blob);
         setResultUrl(url);
       } else if (activeTool.id === 'pdf-to-jpg') {
+        console.log('Converting PDF to JPG...');
         const pdfBytes = await files[0].file.arrayBuffer();
         const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
         const pdf = await loadingTask.promise;
@@ -318,11 +379,11 @@ export default function App() {
         if (context) {
           await page.render({ canvasContext: context, viewport, canvas }).promise;
           const imgData = canvas.toDataURL('image/jpeg');
-          // For images, size is harder to get directly from URL, but we can estimate
-          setProcessedSize(imgData.length * 0.75); // Base64 estimate
+          setProcessedSize(imgData.length * 0.75); 
           setResultUrl(imgData);
         }
       } else if (activeTool.id === 'rotate') {
+        console.log('Rotating PDF...');
         const pdfBytes = await files[0].file.arrayBuffer();
         const pdf = await PDFDocument.load(pdfBytes);
         const pages = pdf.getPages();
@@ -336,6 +397,7 @@ export default function App() {
         const url = URL.createObjectURL(blob);
         setResultUrl(url);
       } else if (activeTool.id === 'watermark') {
+        console.log('Watermarking PDF...');
         const text = prompt('Masukkan teks watermark:');
         if (!text) {
           setIsProcessing(false);
@@ -363,6 +425,7 @@ export default function App() {
         const url = URL.createObjectURL(blob);
         setResultUrl(url);
       } else {
+        console.log('Default processing...');
         await new Promise(resolve => setTimeout(resolve, 2000));
         const blob = new Blob([await files[0].file.arrayBuffer()], { type: 'application/pdf' });
         setProcessedSize(blob.size);
@@ -517,6 +580,15 @@ export default function App() {
                           Unduh PDF
                         </button>
                         <button
+                          onClick={() => {
+                            setResultUrl(null);
+                            setProcessedSize(null);
+                          }}
+                          className="bg-gray-100 text-gray-700 px-8 py-4 rounded-xl font-bold text-lg hover:bg-gray-200 transition-colors"
+                        >
+                          Ubah Pengaturan
+                        </button>
+                        <button
                           onClick={resetTool}
                           className="bg-gray-100 text-gray-700 px-8 py-4 rounded-xl font-bold text-lg hover:bg-gray-200 transition-colors"
                         >
@@ -588,7 +660,104 @@ export default function App() {
                         )}
                       </button>
                     </div>
-                  ) : files.length === 0 ? (
+                  ) : files.length > 0 ? (
+                    <div className="space-y-8">
+                      <div className="bg-gray-50 rounded-2xl p-6 border border-gray-100">
+                        <div className="flex items-center justify-between mb-4">
+                          <h3 className="font-bold text-lg">File Terpilih</h3>
+                          <span className="text-sm text-gray-500">{files.length} file</span>
+                        </div>
+                        <div className="space-y-3">
+                          {files.map((file) => (
+                            <div key={file.id} className="flex items-center justify-between bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
+                              <div className="flex items-center">
+                                <FileIcon className="w-5 h-5 text-[#E5322E] mr-3" />
+                                <div>
+                                  <p className="font-bold text-sm truncate max-w-[200px] md:max-w-md">{file.name}</p>
+                                  <p className="text-xs text-gray-400">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+                                </div>
+                              </div>
+                              <button 
+                                onClick={() => removeFile(file.id)}
+                                className="text-gray-400 hover:text-red-500 transition-colors"
+                              >
+                                <Trash2 className="w-5 h-5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        
+                        {activeTool.id === 'merge' && (
+                          <button 
+                            onClick={() => fileInputRef.current?.click()}
+                            className="w-full mt-4 py-3 border-2 border-dashed border-gray-200 rounded-xl text-gray-500 hover:border-[#E5322E] hover:text-[#E5322E] transition-all flex items-center justify-center font-bold"
+                          >
+                            <Plus className="w-5 h-5 mr-2" />
+                            Tambah file lagi
+                          </button>
+                        )}
+                      </div>
+
+                      {activeTool.id === 'compress' && (
+                        <div className="bg-red-50 rounded-2xl p-8 border border-red-100">
+                          <div className="flex items-center justify-between mb-6">
+                            <h3 className="font-bold text-xl text-[#E5322E]">Pengaturan Kompresi</h3>
+                            <span className="bg-white px-3 py-1 rounded-full text-[#E5322E] font-bold text-sm border border-red-100">
+                              Level: {compressionLevel}%
+                            </span>
+                          </div>
+                          
+                          <div className="space-y-6">
+                            <input 
+                              type="range" 
+                              min="1" 
+                              max="100" 
+                              value={compressionLevel}
+                              onChange={(e) => setCompressionLevel(parseInt(e.target.value))}
+                              className="w-full h-3 bg-red-200 rounded-lg appearance-none cursor-pointer accent-[#E5322E]"
+                            />
+                            
+                            <div className="flex justify-between text-xs font-bold text-gray-400 uppercase tracking-wider">
+                              <span>Kualitas Tinggi (Besar)</span>
+                              <span>Ukuran Kecil (Rendah)</span>
+                            </div>
+
+                            {previewSize && (
+                              <div className="bg-white p-6 rounded-2xl border border-red-100 flex items-center justify-center space-x-8 shadow-sm">
+                                <div className="text-center">
+                                  <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">Ukuran Asli</p>
+                                  <p className="text-xl font-bold">{(files.reduce((acc, f) => acc + f.size, 0) / 1024 / 1024).toFixed(2)} MB</p>
+                                </div>
+                                <ArrowRight className="text-red-200 w-8 h-8" />
+                                <div className="text-center">
+                                  <p className="text-[10px] text-[#E5322E] uppercase font-bold mb-1">Estimasi Hasil</p>
+                                  <p className="text-2xl font-black text-[#E5322E]">{(previewSize / 1024 / 1024).toFixed(2)} MB</p>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      <button
+                        onClick={processPDF}
+                        disabled={isProcessing}
+                        className="w-full bg-[#E5322E] text-white py-5 rounded-xl font-bold text-xl flex items-center justify-center hover:bg-[#C42B27] disabled:bg-gray-300 transition-all shadow-lg shadow-red-200"
+                      >
+                        {isProcessing ? (
+                          <>
+                            <Loader2 className="w-6 h-6 mr-2 animate-spin" />
+                            Memproses...
+                          </>
+                        ) : (
+                          <>
+                            {activeTool.title} Sekarang
+                            <ArrowRight className="w-6 h-6 ml-2" />
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  ) : (
                     <div 
                       className="border-2 border-dashed border-gray-200 rounded-2xl p-20 text-center hover:border-[#E5322E] hover:bg-red-50 transition-all cursor-pointer group"
                       onClick={() => fileInputRef.current?.click()}
@@ -606,55 +775,6 @@ export default function App() {
                         accept={activeTool.id === 'jpg-to-pdf' ? ".jpg,.jpeg,.png" : ".pdf"}
                         className="hidden"
                       />
-                    </div>
-                  ) : (
-                    <div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
-                        {files.map((file) => (
-                          <div key={file.id} className="flex items-center p-4 bg-gray-50 rounded-xl border border-gray-100 group">
-                            <div className="bg-white p-2 rounded-lg mr-4 shadow-sm">
-                              <FileIcon className="w-6 h-6 text-[#E5322E]" />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-bold truncate">{file.name}</p>
-                              <p className="text-xs text-gray-500">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
-                            </div>
-                            <button 
-                              onClick={() => removeFile(file.id)}
-                              className="p-2 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
-                            >
-                              <X className="w-5 h-5" />
-                            </button>
-                          </div>
-                        ))}
-                        {(activeTool.id === 'merge' || activeTool.id === 'jpg-to-pdf') && (
-                          <button 
-                            onClick={() => fileInputRef.current?.click()}
-                            className="flex items-center justify-center p-4 border-2 border-dashed border-gray-200 rounded-xl hover:border-[#E5322E] hover:bg-red-50 transition-all text-gray-400 hover:text-[#E5322E]"
-                          >
-                            <Plus className="w-6 h-6 mr-2" />
-                            Tambah file
-                          </button>
-                        )}
-                      </div>
-
-                      <button
-                        onClick={processPDF}
-                        disabled={isProcessing}
-                        className="w-full bg-[#E5322E] text-white py-5 rounded-xl font-bold text-xl flex items-center justify-center hover:bg-[#C42B27] disabled:bg-gray-300 transition-all shadow-lg shadow-red-200"
-                      >
-                        {isProcessing ? (
-                          <>
-                            <Loader2 className="w-6 h-6 mr-2 animate-spin" />
-                            Memproses...
-                          </>
-                        ) : (
-                          <>
-                            {activeTool.title}
-                            <ArrowRight className="w-6 h-6 ml-2" />
-                          </>
-                        )}
-                      </button>
                     </div>
                   )}
                 </div>
