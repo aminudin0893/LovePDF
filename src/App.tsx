@@ -30,9 +30,10 @@ import html2canvas from 'html2canvas';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
 import * as pdfjsLib from 'pdfjs-dist';
+import JSZip from 'jszip';
 
 // Set worker path for pdfjs-dist
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 // Error Boundary Component
 interface ErrorBoundaryProps {
@@ -244,7 +245,15 @@ export default function App() {
     try {
       if (activeTool.id === 'edit') {
         console.log('Starting Edit PDF conversion...');
-        const doc = new jsPDF('p', 'mm', 'a4');
+        // Ensure html2canvas is available globally for jsPDF
+        (window as any).html2canvas = html2canvas;
+        
+        const doc = new jsPDF({
+          orientation: 'p',
+          unit: 'mm',
+          format: 'a4',
+          compress: true
+        });
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = editorContent;
         tempDiv.style.width = '190mm';
@@ -261,6 +270,7 @@ export default function App() {
         document.body.appendChild(tempDiv);
 
         try {
+          console.log('Calling doc.html...');
           await doc.html(tempDiv, {
             x: 0,
             y: 0,
@@ -269,20 +279,18 @@ export default function App() {
             autoPaging: 'text',
             margin: [10, 10, 10, 10],
             html2canvas: {
-              scale: 0.25, // Reduce scale for better performance and smaller size
+              scale: 0.5, // Slightly higher scale for better quality
               useCORS: true,
-              logging: false
-            },
-            callback: function (doc) {
-              console.log('Edit PDF conversion complete');
-              const pdfBlob = doc.output('blob');
-              setProcessedSize(pdfBlob.size);
-              setResultUrl(URL.createObjectURL(pdfBlob));
-              setIsProcessing(false);
-              if (document.body.contains(tempDiv)) document.body.removeChild(tempDiv);
+              logging: true // Enable logging for debugging
             }
           });
-          return; 
+          
+          console.log('Edit PDF conversion complete');
+          const pdfBlob = doc.output('blob');
+          setProcessedSize(pdfBlob.size);
+          const url = URL.createObjectURL(pdfBlob);
+          setResultUrl(url);
+          if (document.body.contains(tempDiv)) document.body.removeChild(tempDiv);
         } catch (err) {
           console.error('Error in doc.html:', err);
           if (document.body.contains(tempDiv)) document.body.removeChild(tempDiv);
@@ -422,19 +430,43 @@ export default function App() {
         const pdfBytes = await files[0].file.arrayBuffer();
         const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
         const pdf = await loadingTask.promise;
-        const page = await pdf.getPage(1);
-        const viewport = page.getViewport({ scale: 2 });
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-
-        if (context) {
-          await page.render({ canvasContext: context, viewport, canvas }).promise;
-          const imgData = canvas.toDataURL('image/jpeg');
-          setProcessedSize(imgData.length * 0.75); 
-          setResultUrl(imgData);
+        const zip = new JSZip();
+        
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale: 2 });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
+          
+          if (context) {
+            await page.render({ canvasContext: context, viewport, canvas }).promise;
+            const imgData = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+            zip.file(`page-${i}.jpg`, imgData, { base64: true });
+          }
         }
+        
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        setProcessedSize(zipBlob.size);
+        const url = URL.createObjectURL(zipBlob);
+        setResultUrl(url);
+      } else if (activeTool.id === 'pdf-to-word') {
+        console.log('Converting PDF to Word...');
+        const pdfBytes = await files[0].file.arrayBuffer();
+        const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
+        const pdf = await loadingTask.promise;
+        let fullText = '';
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items.map((item: any) => item.str).join(' ');
+          fullText += `Halaman ${i}\n\n${pageText}\n\n`;
+        }
+        const blob = new Blob([fullText], { type: 'application/msword' });
+        setProcessedSize(blob.size);
+        const url = URL.createObjectURL(blob);
+        setResultUrl(url);
       } else if (activeTool.id === 'rotate') {
         console.log('Rotating PDF...');
         const pdfBytes = await files[0].file.arrayBuffer();
@@ -462,7 +494,7 @@ export default function App() {
         pages.forEach(page => {
           const { width, height } = page.getSize();
           page.drawText(text, {
-            x: width / 2 - 50,
+            x: width / 2 - (text.length * 10),
             y: height / 2,
             size: 50,
             opacity: 0.3,
@@ -474,6 +506,56 @@ export default function App() {
           updateFieldAppearances: false
         });
         const blob = new Blob([watermarkedPdfBytes], { type: 'application/pdf' });
+        setProcessedSize(blob.size);
+        const url = URL.createObjectURL(blob);
+        setResultUrl(url);
+      } else if (activeTool.id === 'page-numbers') {
+        console.log('Adding page numbers...');
+        const pdfBytes = await files[0].file.arrayBuffer();
+        const pdf = await PDFDocument.load(pdfBytes);
+        const pages = pdf.getPages();
+        pages.forEach((page, index) => {
+          const { width } = page.getSize();
+          page.drawText(`${index + 1}`, {
+            x: width / 2,
+            y: 20,
+            size: 12,
+            opacity: 0.8
+          });
+        });
+        const numberedPdfBytes = await pdf.save();
+        const blob = new Blob([numberedPdfBytes], { type: 'application/pdf' });
+        setProcessedSize(blob.size);
+        const url = URL.createObjectURL(blob);
+        setResultUrl(url);
+      } else if (activeTool.id === 'repair') {
+        console.log('Repairing PDF...');
+        const pdfBytes = await files[0].file.arrayBuffer();
+        const pdf = await PDFDocument.load(pdfBytes);
+        const repairedPdfBytes = await pdf.save({ useObjectStreams: true });
+        const blob = new Blob([repairedPdfBytes], { type: 'application/pdf' });
+        setProcessedSize(blob.size);
+        const url = URL.createObjectURL(blob);
+        setResultUrl(url);
+      } else if (activeTool.id === 'organize') {
+        console.log('Organizing PDF (reversing pages)...');
+        const pdfBytes = await files[0].file.arrayBuffer();
+        const pdf = await PDFDocument.load(pdfBytes);
+        const organizedPdf = await PDFDocument.create();
+        const indices = pdf.getPageIndices().reverse();
+        const copiedPages = await organizedPdf.copyPages(pdf, indices);
+        copiedPages.forEach(page => organizedPdf.addPage(page));
+        const organizedPdfBytes = await organizedPdf.save();
+        const blob = new Blob([organizedPdfBytes], { type: 'application/pdf' });
+        setProcessedSize(blob.size);
+        const url = URL.createObjectURL(blob);
+        setResultUrl(url);
+      } else if (activeTool.id === 'unlock') {
+        console.log('Unlocking PDF...');
+        const pdfBytes = await files[0].file.arrayBuffer();
+        const pdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+        const unlockedPdfBytes = await pdf.save();
+        const blob = new Blob([unlockedPdfBytes], { type: 'application/pdf' });
         setProcessedSize(blob.size);
         const url = URL.createObjectURL(blob);
         setResultUrl(url);
@@ -494,7 +576,10 @@ export default function App() {
 
   const downloadResult = useCallback(() => {
     if (resultUrl) {
-      const extension = activeTool?.id === 'pdf-to-jpg' ? 'jpg' : 'pdf';
+      let extension = 'pdf';
+      if (activeTool?.id === 'pdf-to-jpg') extension = 'zip';
+      if (activeTool?.id === 'pdf-to-word') extension = 'doc';
+      
       saveAs(resultUrl, `hasil_${activeTool?.id}_${files[0]?.name.split('.')[0] || 'dokumen'}.${extension}`);
     }
   }, [resultUrl, activeTool, files]);
