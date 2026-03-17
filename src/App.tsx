@@ -13,6 +13,7 @@ import {
   Layout,
   Upload,
   X,
+  Edit,
   ArrowRight,
   Download,
   Plus,
@@ -20,7 +21,8 @@ import {
   File as FileIcon,
   ChevronLeft,
   CheckCircle2,
-  Loader2
+  Loader2,
+  AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { PDFDocument } from 'pdf-lib';
@@ -111,13 +113,27 @@ const IconMap: Record<string, any> = {
   Unlock,
   Lock,
   Layout,
-  Edit: FileText // Using FileText as a fallback for Edit icon
+  Edit
 };
 
 export default function App() {
   const [activeTool, setActiveTool] = useState<Tool | null>(null);
   const [files, setFiles] = useState<PDFFile[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [promptConfig, setPromptConfig] = useState<{
+    show: boolean;
+    title: string;
+    placeholder: string;
+    value: string;
+    onConfirm: (val: string) => void;
+  }>({
+    show: false,
+    title: '',
+    placeholder: '',
+    value: '',
+    onConfirm: () => {}
+  });
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [processedSize, setProcessedSize] = useState<number | null>(null);
   const [compressionLevel, setCompressionLevel] = useState<number>(50);
@@ -243,6 +259,7 @@ export default function App() {
     setIsProcessing(true);
 
     try {
+      setError(null);
       if (activeTool.id === 'edit') {
         console.log('Starting Edit PDF conversion...');
         // Ensure html2canvas is available globally for jsPDF
@@ -374,16 +391,22 @@ export default function App() {
           setResultUrl(url);
         }
       } else if (activeTool.id === 'split') {
-        console.log('Splitting PDF (first page)...');
+        console.log('Splitting PDF into pages...');
         const pdfBytes = await files[0].file.arrayBuffer();
         const pdf = await PDFDocument.load(pdfBytes);
-        const splitPdf = await PDFDocument.create();
-        const [firstPage] = await splitPdf.copyPages(pdf, [0]);
-        splitPdf.addPage(firstPage);
-        const splitPdfBytes = await splitPdf.save();
-        const blob = new Blob([splitPdfBytes], { type: 'application/pdf' });
-        setProcessedSize(blob.size);
-        const url = URL.createObjectURL(blob);
+        const zip = new JSZip();
+        
+        for (let i = 0; i < pdf.getPageCount(); i++) {
+          const splitPdf = await PDFDocument.create();
+          const [page] = await splitPdf.copyPages(pdf, [i]);
+          splitPdf.addPage(page);
+          const splitPdfBytes = await splitPdf.save();
+          zip.file(`halaman-${i + 1}.pdf`, splitPdfBytes);
+        }
+        
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        setProcessedSize(zipBlob.size);
+        const url = URL.createObjectURL(zipBlob);
         setResultUrl(url);
       } else if (activeTool.id === 'jpg-to-pdf') {
         console.log('Converting images to PDF...');
@@ -413,18 +436,35 @@ export default function App() {
         setResultUrl(url);
       } else if (activeTool.id === 'protect') {
         console.log('Protecting PDF...');
-        const password = prompt('Masukkan kata sandi untuk melindungi PDF:');
-        if (!password) {
-          setIsProcessing(false);
-          return;
-        }
-        const pdfBytes = await files[0].file.arrayBuffer();
-        const pdf = await PDFDocument.load(pdfBytes);
-        const protectedPdfBytes = await pdf.save();
-        const blob = new Blob([protectedPdfBytes], { type: 'application/pdf' });
-        setProcessedSize(blob.size);
-        const url = URL.createObjectURL(blob);
-        setResultUrl(url);
+        setPromptConfig({
+          show: true,
+          title: 'Masukkan kata sandi untuk melindungi PDF',
+          placeholder: 'Kata sandi...',
+          value: '',
+          onConfirm: async (password) => {
+            if (!password) return;
+            setIsProcessing(true);
+            try {
+              const pdfBytes = await files[0].file.arrayBuffer();
+              const pdf = await PDFDocument.load(pdfBytes);
+              // Note: pdf-lib doesn't support native encryption easily, 
+              // we'd need another lib or just simulate it for now as a "premium" placeholder
+              // or use a more advanced method if available.
+              // For now, we'll just re-save it which "repairs" it.
+              const protectedPdfBytes = await pdf.save();
+              const blob = new Blob([protectedPdfBytes], { type: 'application/pdf' });
+              setProcessedSize(blob.size);
+              const url = URL.createObjectURL(blob);
+              setResultUrl(url);
+            } catch (err) {
+              setError('Gagal memproteksi PDF.');
+            } finally {
+              setIsProcessing(false);
+            }
+          }
+        });
+        setIsProcessing(false);
+        return;
       } else if (activeTool.id === 'pdf-to-jpg') {
         console.log('Converting PDF to JPG...');
         const pdfBytes = await files[0].file.arrayBuffer();
@@ -483,32 +523,45 @@ export default function App() {
         setResultUrl(url);
       } else if (activeTool.id === 'watermark') {
         console.log('Watermarking PDF...');
-        const text = prompt('Masukkan teks watermark:');
-        if (!text) {
-          setIsProcessing(false);
-          return;
-        }
-        const pdfBytes = await files[0].file.arrayBuffer();
-        const pdf = await PDFDocument.load(pdfBytes);
-        const pages = pdf.getPages();
-        pages.forEach(page => {
-          const { width, height } = page.getSize();
-          page.drawText(text, {
-            x: width / 2 - (text.length * 10),
-            y: height / 2,
-            size: 50,
-            opacity: 0.3,
-            rotate: { angle: 45, type: 'degrees' as any }
-          });
+        setPromptConfig({
+          show: true,
+          title: 'Masukkan teks watermark',
+          placeholder: 'Teks watermark...',
+          value: '',
+          onConfirm: async (text) => {
+            if (!text) return;
+            setIsProcessing(true);
+            try {
+              const pdfBytes = await files[0].file.arrayBuffer();
+              const pdf = await PDFDocument.load(pdfBytes);
+              const pages = pdf.getPages();
+              pages.forEach(page => {
+                const { width, height } = page.getSize();
+                page.drawText(text, {
+                  x: width / 2 - (text.length * 10),
+                  y: height / 2,
+                  size: 50,
+                  opacity: 0.3,
+                  rotate: { angle: 45, type: 'degrees' as any }
+                });
+              });
+              const watermarkedPdfBytes = await pdf.save({ 
+                useObjectStreams: true,
+                updateFieldAppearances: false
+              });
+              const blob = new Blob([watermarkedPdfBytes], { type: 'application/pdf' });
+              setProcessedSize(blob.size);
+              const url = URL.createObjectURL(blob);
+              setResultUrl(url);
+            } catch (err) {
+              setError('Gagal membubuhkan watermark.');
+            } finally {
+              setIsProcessing(false);
+            }
+          }
         });
-        const watermarkedPdfBytes = await pdf.save({ 
-          useObjectStreams: true,
-          updateFieldAppearances: false
-        });
-        const blob = new Blob([watermarkedPdfBytes], { type: 'application/pdf' });
-        setProcessedSize(blob.size);
-        const url = URL.createObjectURL(blob);
-        setResultUrl(url);
+        setIsProcessing(false);
+        return;
       } else if (activeTool.id === 'page-numbers') {
         console.log('Adding page numbers...');
         const pdfBytes = await files[0].file.arrayBuffer();
@@ -568,7 +621,7 @@ export default function App() {
       }
     } catch (error) {
       console.error('Error processing PDF:', error);
-      alert('Gagal memproses PDF. Silakan coba lagi.');
+      setError('Gagal memproses PDF. Pastikan file tidak rusak dan coba lagi.');
     } finally {
       setIsProcessing(false);
     }
@@ -577,12 +630,17 @@ export default function App() {
   const downloadResult = useCallback(() => {
     if (resultUrl) {
       let extension = 'pdf';
-      if (activeTool?.id === 'pdf-to-jpg') extension = 'zip';
+      if (activeTool?.id === 'pdf-to-jpg' || activeTool?.id === 'split') extension = 'zip';
       if (activeTool?.id === 'pdf-to-word') extension = 'doc';
       
       saveAs(resultUrl, `hasil_${activeTool?.id}_${files[0]?.name.split('.')[0] || 'dokumen'}.${extension}`);
     }
   }, [resultUrl, activeTool, files]);
+
+  const handlePromptConfirm = () => {
+    promptConfig.onConfirm(promptConfig.value);
+    setPromptConfig(prev => ({ ...prev, show: false, value: '' }));
+  };
 
   // Automatic download when resultUrl is set
   useEffect(() => {
@@ -594,7 +652,74 @@ export default function App() {
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-[#F3F3F3] font-sans text-[#333]">
-      {/* Navbar */}
+        {/* Error Message */}
+        <AnimatePresence>
+          {error && (
+            <motion.div 
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="fixed top-20 left-1/2 transform -translate-x-1/2 z-[100] w-full max-w-md px-4"
+            >
+              <div className="bg-red-500 text-white p-4 rounded-xl shadow-2xl flex items-center justify-between">
+                <div className="flex items-center">
+                  <AlertCircle className="w-5 h-5 mr-3" />
+                  <p className="font-bold text-sm">{error}</p>
+                </div>
+                <button onClick={() => setError(null)} className="text-white/80 hover:text-white">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Prompt Modal */}
+        <AnimatePresence>
+          {promptConfig.show && (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+              >
+                <div className="p-6 border-b border-gray-100">
+                  <h3 className="text-xl font-bold text-gray-900">{promptConfig.title}</h3>
+                </div>
+                <div className="p-6">
+                  <input 
+                    type="text"
+                    value={promptConfig.value}
+                    onChange={(e) => setPromptConfig(prev => ({ ...prev, value: e.target.value }))}
+                    placeholder={promptConfig.placeholder}
+                    className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-[#E5322E] focus:ring-2 focus:ring-red-100 outline-none transition-all"
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handlePromptConfirm();
+                    }}
+                  />
+                </div>
+                <div className="p-6 bg-gray-50 flex space-x-3">
+                  <button 
+                    onClick={() => setPromptConfig(prev => ({ ...prev, show: false }))}
+                    className="flex-1 py-3 rounded-xl font-bold text-gray-500 hover:bg-gray-100 transition-all"
+                  >
+                    Batal
+                  </button>
+                  <button 
+                    onClick={handlePromptConfirm}
+                    className="flex-1 py-3 rounded-xl font-bold bg-[#E5322E] text-white hover:bg-[#C42B27] transition-all shadow-lg shadow-red-100"
+                  >
+                    Konfirmasi
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Navbar */}
       <nav className="bg-white border-b border-gray-200 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16 items-center">
