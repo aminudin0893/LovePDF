@@ -32,7 +32,7 @@ import 'react-quill-new/dist/quill.snow.css';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Set worker path for pdfjs-dist
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
 
 // Error Boundary Component
 interface ErrorBoundaryProps {
@@ -146,17 +146,29 @@ export default function App() {
           for (let i = 1; i <= pdf.numPages; i++) {
             const page = await pdf.getPage(i);
             const textContent = await page.getTextContent();
-            let lastY: number | null = null;
+            const items = textContent.items as any[];
+            
+            // Sort items by Y (top to bottom) then X (left to right)
+            items.sort((a, b) => {
+              if (Math.abs(a.transform[5] - b.transform[5]) > 5) {
+                return b.transform[5] - a.transform[5];
+              }
+              return a.transform[4] - b.transform[4];
+            });
+
+            let lastY = -1;
             let pageHtml = '';
             
-            for (const item of textContent.items as any[]) {
-              if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
+            for (const item of items) {
+              if (lastY !== -1 && Math.abs(item.transform[5] - lastY) > 5) {
                 pageHtml += '<br/>';
+              } else if (lastY !== -1) {
+                pageHtml += ' ';
               }
               pageHtml += item.str;
               lastY = item.transform[5];
             }
-            fullText += `<div style="margin-bottom: 20px;">${pageHtml}</div>`;
+            fullText += `<div style="margin-bottom: 30px; padding: 20px; border-bottom: 1px solid #eee;">${pageHtml}</div>`;
           }
           setEditorContent(fullText || '<p>Mulai mengetik di sini...</p>');
         } catch (error) {
@@ -189,28 +201,25 @@ export default function App() {
     if (activeTool?.id === 'compress' && files.length > 0) {
       console.log('Calculating preview size for level:', compressionLevel);
       try {
-        const pdfBytes = await files[0].file.arrayBuffer();
-        const pdf = await PDFDocument.load(pdfBytes);
+        const originalSize = files[0].size;
         
-        const compressedPdf = await PDFDocument.create();
-        const copiedPages = await compressedPdf.copyPages(pdf, pdf.getPageIndices());
-        copiedPages.forEach((page) => compressedPdf.addPage(page));
-        
-        // Simulate compression level by adjusting save options
-        const compressedPdfBytes = await compressedPdf.save({ 
-          useObjectStreams: compressionLevel > 30,
-          addDefaultPage: false,
-          updateFieldAppearances: false
-        });
-        
-        // If compressionLevel is very high, we simulate further reduction for UI feedback
-        let estimatedSize = compressedPdfBytes.length;
+        // If level is high (>70), we use the image-based compression logic
+        // which drastically reduces size but loses text searchability.
         if (compressionLevel > 70) {
-          estimatedSize = estimatedSize * (1 - (compressionLevel - 70) / 100);
+          // Estimate based on scale and quality
+          // scale 2.0 -> 0.8, quality 1.0 -> 0.3
+          const scale = 2.0 - (compressionLevel / 100) * 1.2;
+          const quality = 1.0 - (compressionLevel / 100) * 0.7;
+          
+          // Rough estimation: size scales with area (scale^2) and quality
+          const estimated = originalSize * (scale * scale) * quality * 0.5; 
+          setPreviewSize(Math.min(estimated, originalSize * 0.4));
+        } else {
+          // Standard compression: strips metadata and uses object streams
+          // Usually reduces size by 5-20%
+          const reduction = 0.05 + (compressionLevel / 70) * 0.15;
+          setPreviewSize(originalSize * (1 - reduction));
         }
-        
-        console.log('Estimated size:', estimatedSize);
-        setPreviewSize(estimatedSize);
       } catch (error) {
         console.error('Error calculating preview size:', error);
       }
@@ -296,22 +305,66 @@ export default function App() {
       } else if (activeTool.id === 'compress') {
         console.log('Compressing PDF with level:', compressionLevel);
         const pdfBytes = await files[0].file.arrayBuffer();
-        const pdf = await PDFDocument.load(pdfBytes);
         
-        const compressedPdf = await PDFDocument.create();
-        const copiedPages = await compressedPdf.copyPages(pdf, pdf.getPageIndices());
-        copiedPages.forEach((page) => compressedPdf.addPage(page));
-        
-        const compressedPdfBytes = await compressedPdf.save({ 
-          useObjectStreams: compressionLevel > 20,
-          addDefaultPage: false,
-          updateFieldAppearances: false
-        });
-        
-        const blob = new Blob([compressedPdfBytes], { type: 'application/pdf' });
-        setProcessedSize(blob.size);
-        const url = URL.createObjectURL(blob);
-        setResultUrl(url);
+        // Premium Compression: If level is high, we re-render pages to images to drastically reduce size
+        // This is especially effective for scanned PDFs or PDFs with large images.
+        if (compressionLevel > 70) {
+          console.log('Using Premium Image-based Compression...');
+          const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
+          const pdf = await loadingTask.promise;
+          const compressedPdf = await PDFDocument.create();
+          
+          // Scale factor based on compression level (higher level = lower scale/quality)
+          // 70% -> scale 1.5, 100% -> scale 0.8
+          const scale = 2.0 - (compressionLevel / 100) * 1.2;
+          const quality = 1.0 - (compressionLevel / 100) * 0.7;
+
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const viewport = page.getViewport({ scale });
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            if (context) {
+              await page.render({ canvasContext: context, viewport, canvas }).promise;
+              const imgData = canvas.toDataURL('image/jpeg', quality);
+              const imgBytes = await fetch(imgData).then(res => res.arrayBuffer());
+              const image = await compressedPdf.embedJpg(imgBytes);
+              const newPage = compressedPdf.addPage([viewport.width, viewport.height]);
+              newPage.drawImage(image, {
+                x: 0,
+                y: 0,
+                width: viewport.width,
+                height: viewport.height,
+              });
+            }
+          }
+          
+          const compressedPdfBytes = await compressedPdf.save({ useObjectStreams: true });
+          const blob = new Blob([compressedPdfBytes], { type: 'application/pdf' });
+          setProcessedSize(blob.size);
+          const url = URL.createObjectURL(blob);
+          setResultUrl(url);
+        } else {
+          // Standard compression for lower levels (preserves text searchability)
+          const pdf = await PDFDocument.load(pdfBytes);
+          const compressedPdf = await PDFDocument.create();
+          const copiedPages = await compressedPdf.copyPages(pdf, pdf.getPageIndices());
+          copiedPages.forEach((page) => compressedPdf.addPage(page));
+          
+          const compressedPdfBytes = await compressedPdf.save({ 
+            useObjectStreams: true,
+            addDefaultPage: false,
+            updateFieldAppearances: false
+          });
+          
+          const blob = new Blob([compressedPdfBytes], { type: 'application/pdf' });
+          setProcessedSize(blob.size);
+          const url = URL.createObjectURL(blob);
+          setResultUrl(url);
+        }
       } else if (activeTool.id === 'split') {
         console.log('Splitting PDF (first page)...');
         const pdfBytes = await files[0].file.arrayBuffer();
@@ -701,7 +754,14 @@ export default function App() {
                       {activeTool.id === 'compress' && (
                         <div className="bg-red-50 rounded-2xl p-8 border border-red-100">
                           <div className="flex items-center justify-between mb-6">
-                            <h3 className="font-bold text-xl text-[#E5322E]">Pengaturan Kompresi</h3>
+                            <div className="flex items-center">
+                              <h3 className="font-bold text-xl text-[#E5322E]">Pengaturan Kompresi</h3>
+                              {compressionLevel > 70 && (
+                                <span className="ml-3 bg-[#E5322E] text-white text-[10px] px-2 py-1 rounded-md font-black uppercase tracking-tighter animate-pulse">
+                                  Premium Mode
+                                </span>
+                              )}
+                            </div>
                             <span className="bg-white px-3 py-1 rounded-full text-[#E5322E] font-bold text-sm border border-red-100">
                               Level: {compressionLevel}%
                             </span>
@@ -721,6 +781,12 @@ export default function App() {
                               <span>Kualitas Tinggi (Besar)</span>
                               <span>Ukuran Kecil (Rendah)</span>
                             </div>
+
+                            {compressionLevel > 70 && (
+                              <p className="text-[10px] text-red-400 italic text-center">
+                                * Mode Premium akan mengonversi teks menjadi gambar untuk ukuran file yang sangat kecil.
+                              </p>
+                            )}
 
                             {previewSize && (
                               <div className="bg-white p-6 rounded-2xl border border-red-100 flex items-center justify-center space-x-8 shadow-sm">
